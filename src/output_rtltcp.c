@@ -170,21 +170,23 @@ static int parse_command(r_cfg_t *cfg, uint8_t const *buf, int len)
     switch (cmd) {
     case RTLTCP_SET_FREQ:
         fprintf(stderr, "rtl_tcp received command SET_FREQ with %u\n", arg);
-        // set_center_freq(cfg, arg);
+        set_center_freq(cfg, arg);
         break;
     case RTLTCP_SET_SAMPLE_RATE:
         fprintf(stderr, "rtl_tcp received command SET_SAMPLE_RATE with %u\n", arg);
-        // set_sample_rate(cfg, arg);
+        set_sample_rate(cfg, arg);
         break;
     case RTLTCP_SET_GAIN_MODE:
         fprintf(stderr, "rtl_tcp received command SET_GAIN_MODE with %u\n", arg);
+        // if (arg == 0 /* =auto */) sdr_set_auto_gain(dev, 0);
         break;
     case RTLTCP_SET_GAIN:
         fprintf(stderr, "rtl_tcp received command SET_GAIN with %u\n", arg);
+        // sdr_set_tuner_gain(dev, char const *gain_str, 0)
         break;
     case RTLTCP_SET_FREQ_CORRECTION:
         fprintf(stderr, "rtl_tcp received command SET_FREQ_CORRECTION with %u\n", arg);
-        // set_freq_correction(cfg, (int)arg);
+        set_freq_correction(cfg, (int)arg);
         break;
     case RTLTCP_SET_IF_TUNER_GAIN:
         fprintf(stderr, "rtl_tcp received command SET_IF_TUNER_GAIN with %u\n", arg);
@@ -194,6 +196,7 @@ static int parse_command(r_cfg_t *cfg, uint8_t const *buf, int len)
         break;
     case RTLTCP_SET_AGC_MODE:
         fprintf(stderr, "rtl_tcp received command SET_AGC_MODE with %u\n", arg);
+        // ...
         break;
     case RTLTCP_SET_DIRECT_SAMPLING:
         fprintf(stderr, "rtl_tcp received command SET_DIRECT_SAMPLING with %u\n", arg);
@@ -252,6 +255,7 @@ static THREAD_RETURN THREAD_CALL accept_thread(void *arg)
         unsigned addr_len = sizeof(addr);
         int sock = accept(srv->sock, (struct sockaddr *)&addr, &addr_len);
 
+        // TODO: ignore ECONNABORTED (Software caused connection abort)
         if (sock < 0) {
             perror("ERROR on accept");
             continue;
