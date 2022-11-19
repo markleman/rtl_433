@@ -149,6 +149,7 @@ static void usage(int exit_code)
             "  [-H <seconds>] Hop interval for polling of multiple frequencies (default: %i seconds)\n"
             "  [-p <ppm_error>] Correct rtl-sdr tuner frequency offset error (default: 0)\n"
             "  [-s <sample rate>] Set sample rate (default: %i Hz)\n"
+            "  [-D restart | pause | quit | manual] Input device run mode options.\n"
             "\t\t= Demodulator options =\n"
             "  [-R <device> | help] Enable only the specified device decoding protocol (can be used multiple times)\n"
             "       Specify a negative number to disable a device decoding protocol (can be used multiple times)\n"
@@ -206,7 +207,7 @@ static void help_protocols(r_device *devices, unsigned num_devices, int exit_cod
 }
 
 _Noreturn
-static void help_device(void)
+static void help_device_selection(void)
 {
     term_help_printf(
             "\t\t= Input device selection =\n"
@@ -240,6 +241,21 @@ static void help_gain(void)
             "\tFor RTL-SDR: gain in dB (\"0\" is auto).\n"
             "\tFor SoapySDR: gain in dB for automatic distribution (\"\" is auto), or string of gain elements.\n"
             "\tE.g. \"LNA=20,TIA=8,PGA=2\" for LimeSDR.\n");
+    exit(0);
+}
+
+_Noreturn
+static void help_device_mode(void)
+{
+    term_help_printf(
+            "\t\t= Input device run mode =\n"
+            "  [-D restart | pause | quit | manual] Input device run mode options.\n"
+            "\tSupported input device run modes:\n"
+            "\t  restart: Restart the input device on errors\n"
+            "\t  pause: Pause the input device on errors, waits for e.g. HTTP-API control\n"
+            "\t  quit: Quit on input device errors (default)\n"
+            "\t  manual: Don't start an input device, waits for e.g. HTTP-API control\n"
+            "\tWithout this option the default is to start the SDR and quit on errors.\n");
     exit(0);
 }
 
@@ -741,7 +757,7 @@ static int hasopt(int test, int argc, char *argv[], char const *optstring)
 
 static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg);
 
-#define OPTSTRING "hVvqDc:x:z:p:a:AI:S:m:M:r:w:W:l:d:t:f:H:g:s:b:n:R:X:F:K:C:T:UGy:E:Y:"
+#define OPTSTRING "hVvqD:c:x:z:p:a:AI:S:m:M:r:w:W:l:d:t:f:H:g:s:b:n:R:X:F:K:C:T:UGy:E:Y:"
 
 // these should match the short options exactly
 static struct conf_keywords const conf_keywords[] = {
@@ -751,6 +767,7 @@ static struct conf_keywords const conf_keywords[] = {
         {"config_file", 'c'},
         {"report_meta", 'M'},
         {"device", 'd'},
+        {"device_mode", 'D'},
         {"settings", 't'},
         {"gain", 'g'},
         {"frequency", 'f'},
@@ -857,9 +874,30 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         break;
     case 'd':
         if (!arg)
-            help_device();
+            help_device_selection();
 
         cfg->dev_query = arg;
+        break;
+    case 'D':
+        if (!arg)
+            help_device_mode();
+
+        if (strcmp(arg, "quit") == 0) {
+            cfg->dev_mode = DEVICE_MODE_RESTART;
+        }
+        else if (strcmp(arg, "restart") == 0) {
+            cfg->dev_mode = DEVICE_MODE_RESTART;
+        }
+        else if (strcmp(arg, "pause") == 0) {
+            cfg->dev_mode = DEVICE_MODE_PAUSE;
+        }
+        else if (strcmp(arg, "manual") == 0) {
+            cfg->dev_mode = DEVICE_MODE_MANUAL;
+        }
+        else {
+            fprintf(stderr, "Invalid input device run mode: %s\n", arg);
+            help_device_mode();
+        }
         break;
     case 't':
         // this option changed, check and warn if old meaning is used
@@ -1060,9 +1098,6 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         else
             cfg->report_meta = atobv(arg, 1);
         break;
-    case 'D':
-        fprintf(stderr, "debug option (-D) is deprecated. See -v to increase verbosity\n");
-        break;
     case 'z':
         fprintf(stderr, "override_short (-z) is deprecated.\n");
         break;
@@ -1144,7 +1179,7 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
             add_rtltcp_output(cfg, arg_param(arg));
         }
         else {
-            fprintf(stderr, "Invalid output format %s\n", arg);
+            fprintf(stderr, "Invalid output format: %s\n", arg);
             usage(1);
         }
         break;
@@ -1166,7 +1201,7 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
             cfg->conversion_mode = CONVERT_CUSTOMARY;
         }
         else {
-            fprintf(stderr, "Invalid conversion mode %s\n", arg);
+            fprintf(stderr, "Invalid conversion mode: %s\n", arg);
             usage(1);
         }
         break;
@@ -1343,7 +1378,8 @@ static void sdr_handler(struct mg_connection *nc, int ev_type, void *ev_data)
     }
 
     if (cfg->exit_async) {
-        fprintf(stderr, "sdr_handler exit\n");
+        if (cfg->verbosity > 1)
+            fprintf(stderr, "sdr_handler exit\n");
         sdr_stop(cfg->dev);
         cfg->exit_async++;
     }
@@ -1366,6 +1402,55 @@ static void acquire_callback(sdr_event_t *ev, void *ctx)
     //fprintf(stderr, "acquire_callback bc done...\n");
 }
 
+static int start_sdr(r_cfg_t *cfg)
+{
+    int r;
+    r = sdr_open(&cfg->dev, cfg->dev_query, cfg->verbosity);
+    if (r < 0) {
+        return -1; // exit(2);
+    }
+    cfg->dev_info = sdr_get_dev_info(cfg->dev);
+    cfg->demod->sample_size = sdr_get_sample_size(cfg->dev);
+    // cfg->demod->sample_signed = sdr_get_sample_signed(cfg->dev);
+
+    /* Set the sample rate */
+    r = sdr_set_sample_rate(cfg->dev, cfg->samp_rate, 1); // always verbose
+
+    if (cfg->verbosity || cfg->demod->level_limit < 0.0)
+        fprintf(stderr, "Bit detection level set to %.1f%s.\n", cfg->demod->level_limit, (cfg->demod->level_limit < 0.0 ? "" : " (Auto)"));
+
+    r = sdr_apply_settings(cfg->dev, cfg->settings_str, 1); // always verbose for soapy
+
+    /* Enable automatic gain if gain_str empty (or 0 for RTL-SDR), set manual gain otherwise */
+    r = sdr_set_tuner_gain(cfg->dev, cfg->gain_str, 1); // always verbose
+
+    if (cfg->ppm_error) {
+        r = sdr_set_freq_correction(cfg->dev, cfg->ppm_error, 1); // always verbose
+    }
+
+    /* Reset endpoint before we start reading from it (mandatory) */
+    r = sdr_reset(cfg->dev, cfg->verbosity);
+    if (r < 0) {
+        fprintf(stderr, "WARNING: Failed to reset buffers.\n");
+    }
+    r = sdr_activate(cfg->dev);
+
+    if (cfg->verbosity) {
+        fprintf(stderr, "Reading samples in async mode...\n");
+    }
+
+    r = sdr_set_center_freq(cfg->dev, cfg->center_frequency, 1); // always verbose
+
+    r = sdr_start(cfg->dev, acquire_callback, (void *)get_mgr(cfg),
+            DEFAULT_ASYNC_BUF_NUMBER, cfg->out_block_size);
+    if (r < 0) {
+        fprintf(stderr, "WARNING: async start failed (%i).\n", r);
+    }
+
+    cfg->dev_state = DEVICE_STATE_STARTING;
+    return r;
+}
+
 static void timer_handler(struct mg_connection *nc, int ev, void *ev_data)
 {
     //fprintf(stderr, "%s: %d, %d, %p, %p\n", __func__, nc->sock, ev, nc->user_data, ev_data);
@@ -1378,14 +1463,54 @@ static void timer_handler(struct mg_connection *nc, int ev, void *ev_data)
         //fprintf(stderr, "timer event, current time: %.2lf, next timer: %.2lf\n", now, next);
         mg_set_timer(nc, next); // Send us timer event again after 1.5 seconds
 
-        if (cfg->watchdog == 0) {
-            // We expect a frame at least every 250 ms
-            write_err("Async read stalled, exiting!\n");
-            cfg->exit_code  = 3;
-            cfg->exit_async = 1;
-            sdr_stop(cfg->dev);
+        // Did we acquire data frames in the last interval?
+        if (cfg->watchdog != 0) {
+            if (cfg->dev_state == DEVICE_STATE_STARTING
+                    || cfg->dev_state == DEVICE_STATE_GRACE) {
+                cfg->dev_state = DEVICE_STATE_STARTED;
+            }
+            cfg->watchdog = 0;
+            break;
         }
-        cfg->watchdog = 0;
+
+        // Upon starting allow more time until the first frame
+        if (cfg->dev_state == DEVICE_STATE_STARTING) {
+            cfg->dev_state = DEVICE_STATE_GRACE;
+            break;
+        }
+        // We expect a frame at least every 250 ms but didn't get one
+        if (cfg->dev_state == DEVICE_STATE_GRACE) {
+            if (cfg->dev_mode == DEVICE_MODE_QUIT) {
+                write_err("Input device start failed, exiting!\n");
+            }
+            else if (cfg->dev_mode == DEVICE_MODE_RESTART) {
+                write_err("Input device start failed, restarting!\n");
+            }
+            else { // DEVICE_MODE_PAUSE or DEVICE_MODE_MANUAL
+                write_err("Input device start failed, pausing!\n");
+            }
+        }
+        else if (cfg->dev_state == DEVICE_STATE_STARTED) {
+            if (cfg->dev_mode == DEVICE_MODE_QUIT) {
+                write_err("Async read stalled, exiting!\n");
+            }
+            else if (cfg->dev_mode == DEVICE_MODE_RESTART) {
+                write_err("Async read stalled, restarting!\n");
+            }
+            else { // DEVICE_MODE_PAUSE or DEVICE_MODE_MANUAL
+                write_err("Async read stalled, pausing!\n");
+            }
+        }
+        cfg->exit_code = 3;
+        sdr_stop(cfg->dev);
+        cfg->dev_state = DEVICE_STATE_STOPPED;
+        if (cfg->dev_mode == DEVICE_MODE_QUIT) {
+            cfg->exit_async = 1;
+        }
+        if (cfg->dev_mode == DEVICE_MODE_RESTART) {
+            start_sdr(cfg);
+        }
+        // do nothing for DEVICE_MODE_PAUSE or DEVICE_MODE_MANUAL
 
         break;
     }
@@ -1393,10 +1518,6 @@ static void timer_handler(struct mg_connection *nc, int ev, void *ev_data)
 }
 
 int main(int argc, char **argv) {
-#ifndef _WIN32
-    struct sigaction sigact;
-#endif
-    FILE *in_file;
     int r = 0;
     struct dm_state *demod;
     r_cfg_t *cfg = &g_cfg;
@@ -1651,6 +1772,7 @@ int main(int argc, char **argv) {
             cfg->samp_rate        = demod->load_info.sample_rate ? demod->load_info.sample_rate : sample_rate_0;
             cfg->center_frequency = demod->load_info.center_frequency ? demod->load_info.center_frequency : cfg->frequency[0];
 
+            FILE *in_file;
             if (strcmp(demod->load_info.path, "-") == 0) { // read samples from stdin
                 in_file = stdin;
                 cfg->in_filename = "<stdin>";
@@ -1793,21 +1915,14 @@ int main(int argc, char **argv) {
         exit(0);
     }
 
+    // Normal case, no test data, no in files
     if (cfg->sr_filename) {
         fprintf(stderr, "SR writing not recommended for live input\n");
         exit(1);
     }
 
-    // Normal case, no test data, no in files
-    r = sdr_open(&cfg->dev, cfg->dev_query, cfg->verbosity);
-    if (r < 0) {
-        exit(2);
-    }
-    cfg->dev_info = sdr_get_dev_info(cfg->dev);
-    demod->sample_size = sdr_get_sample_size(cfg->dev);
-    //demod->sample_signed = sdr_get_sample_signed(cfg->dev);
-
 #ifndef _WIN32
+    struct sigaction sigact;
     sigact.sa_handler = sighandler;
     sigemptyset(&sigact.sa_mask);
     sigact.sa_flags = 0;
@@ -1820,60 +1935,40 @@ int main(int argc, char **argv) {
 #else
     SetConsoleCtrlHandler((PHANDLER_ROUTINE)console_handler, TRUE);
 #endif
-    /* Set the sample rate */
-    r = sdr_set_sample_rate(cfg->dev, cfg->samp_rate, 1); // always verbose
 
-    if (cfg->verbosity || demod->level_limit < 0.0)
-        fprintf(stderr, "Bit detection level set to %.1f%s.\n", demod->level_limit, (demod->level_limit < 0.0 ? "" : " (Auto)"));
-
-    r = sdr_apply_settings(cfg->dev, cfg->settings_str, 1); // always verbose for soapy
-
-    /* Enable automatic gain if gain_str empty (or 0 for RTL-SDR), set manual gain otherwise */
-    r = sdr_set_tuner_gain(cfg->dev, cfg->gain_str, 1); // always verbose
-
-    if (cfg->ppm_error)
-        r = sdr_set_freq_correction(cfg->dev, cfg->ppm_error, 1); // always verbose
-
-    /* Reset endpoint before we start reading from it (mandatory) */
-    r = sdr_reset(cfg->dev, cfg->verbosity);
-    if (r < 0)
-        fprintf(stderr, "WARNING: Failed to reset buffers.\n");
-    r = sdr_activate(cfg->dev);
-
-    if (cfg->verbosity) {
-        fprintf(stderr, "Reading samples in async mode...\n");
+    // TODO: remove this before next release
+    fprintf(stderr, "The internals of input handling changed, read about and report problems on PR #1978\n");
+    if (cfg->dev_mode != DEVICE_MODE_MANUAL) {
+        r = start_sdr(cfg);
+        if (r < 0) {
+            exit(2);
+        }
     }
+
     if (cfg->duration > 0) {
         time(&cfg->stop_time);
         cfg->stop_time += cfg->duration;
     }
 
-    r = sdr_set_center_freq(cfg->dev, cfg->center_frequency, 1); // always verbose
+    time(&cfg->hop_start_time);
 
-        time(&cfg->hop_start_time);
+    // add dummy socket to receive broadcasts
+    struct mg_add_sock_opts opts = {.user_data = cfg};
+    struct mg_connection *nc = mg_add_sock_opt(get_mgr(cfg), INVALID_SOCKET, timer_handler, opts);
+    // Send us MG_EV_TIMER event after 2.5 seconds
+    mg_set_timer(nc, mg_time() + 2.5);
 
-        // add dummy socket to receive broadcasts
-        struct mg_add_sock_opts opts = {.user_data = cfg};
-        struct mg_connection *nc = mg_add_sock_opt(get_mgr(cfg), INVALID_SOCKET, timer_handler, opts);
-        // Send us MG_EV_TIMER event after 2.5 seconds
-        mg_set_timer(nc, mg_time() + 2.5);
-
-        r = sdr_start(cfg->dev, acquire_callback, (void *)get_mgr(cfg),
-                DEFAULT_ASYNC_BUF_NUMBER, cfg->out_block_size);
-        if (r < 0) {
-            fprintf(stderr, "WARNING: async start failed (%i).\n", r);
-        }
-
-        while (!cfg->exit_async) {
-            mg_mgr_poll(cfg->mgr, 500);
-        }
+    while (!cfg->exit_async) {
+        mg_mgr_poll(cfg->mgr, 500);
+    }
+    if (cfg->verbosity > 1)
         fprintf(stderr, "STOPPING MGR loop.\n");
-        // final polls to drain the broadcast
-        //while (cfg->exit_async < 2) {
-        //    mg_mgr_poll(cfg->mgr, 100);
-        //}
-        //sdr_stop(cfg->dev);
-        //fprintf(stderr, "STOPPED MGR loop.\n");
+    // final polls to drain the broadcast
+    //while (cfg->exit_async < 2) {
+    //    mg_mgr_poll(cfg->mgr, 100);
+    //}
+    //sdr_stop(cfg->dev);
+    //fprintf(stderr, "STOPPED MGR loop.\n");
 
     if (cfg->report_stats > 0) {
         event_occurred_handler(cfg, create_report_data(cfg, cfg->report_stats));
