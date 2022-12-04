@@ -210,6 +210,7 @@ struct data_output *data_output_syslog_create(const char *host, const char *port
     }
 #endif
 
+    syslog->output.log_level    = LOG_WARNING; // FIXME: needs to be parsed from args
     syslog->output.output_print = data_output_syslog_print;
     syslog->output.output_free  = data_output_syslog_free;
     // Severity 5 "Notice", Facility 20 "local use 4"
