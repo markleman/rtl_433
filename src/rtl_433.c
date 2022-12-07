@@ -1136,9 +1136,11 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         }
         else if (strncmp(arg, "log", 3) == 0) {
             add_log_output(cfg, arg_param(arg));
+            cfg->has_logout = 1;
         }
         else if (strncmp(arg, "kv", 2) == 0) {
             add_kv_output(cfg, arg_param(arg));
+            cfg->has_logout = 1;
         }
         else if (strncmp(arg, "mqtt", 4) == 0) {
             add_mqtt_output(cfg, arg);
@@ -1447,8 +1449,14 @@ int main(int argc, char **argv) {
     }
 
     if (!cfg->output_handler.len) {
-        add_log_output(cfg, NULL);
+        // Default to KV, HTTP, and rtl_tcp outputs
         add_kv_output(cfg, NULL);
+        // add_http_output(cfg, NULL);
+        // add_rtltcp_output(cfg, NULL);
+    }
+    else if (!cfg->has_logout) {
+        // Warn if no log outputs are enabled
+        fprintf(stderr, "Use \"-F log\" if you want any messages, warnings, and errors in the console.\n");
     }
     // Change log handler after outputs are set up
     r_redirect_logging(cfg);
